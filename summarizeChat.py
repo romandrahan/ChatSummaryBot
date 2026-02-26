@@ -33,7 +33,8 @@ from typing import List, Tuple
 uvloop.install()
 
 url_pattern = re.compile(r"(https?://\S+)")
-api_key = os.environ.get("GROQ_API_KEY")
+# api_key = os.environ.get("GROQ_API_KEY")
+api_key = "todo"
 ALL_TOPIC = "Main topic"
 
 
@@ -61,7 +62,9 @@ def load_config(config_file="config.yaml"):
 
 
 # Initialize the tokenizer globally
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer = GPT2Tokenizer.from_pretrained(
+    "gpt2", clean_up_tokenization_spaces=False
+)
 
 
 format_style = """Format using emojis, bbbullet points, and other visual elements to make the summary engaging and easy to read."""
@@ -293,13 +296,21 @@ class TelegramSummarizer:
 
     def __init__(self):
         self.reload_config()
-        config = self.config
-        self.app = Client(
-            config["session_name"], api_id=config["api_id"], api_hash=config["api_hash"]
-        )
+        self.app = None
         self.thread_cache: dict[str, ThreadInfo] = {}
-        self.reload_config()
-        self.summary_channel_id = config["summary_channel_id"]
+        self.summary_channel_id = self.config["summary_channel_id"]
+
+    def ensure_app(self):
+        """
+        Create the Pyrogram client after the asyncio loop is running.
+        This avoids cross-loop issues when used with asyncio.run(...).
+        """
+        if self.app is None:
+            self.app = Client(
+                self.config["session_name"],
+                api_id=self.config["api_id"],
+                api_hash=self.config["api_hash"],
+            )
 
     async def get_chat_topics(self, chat_id) -> dict[str, int]:
         rv = {}
@@ -350,6 +361,7 @@ class TelegramSummarizer:
 
     async def fetch_dialogs(self):
         # Fetch and print available dialogs (channels and chats)
+        self.ensure_app()
         async with self.app:
             tex = """
             
@@ -365,6 +377,7 @@ class TelegramSummarizer:
 
     async def process_channels(self):
         # Calculate the time offset based on summarization frequency
+        self.ensure_app()
         async with self.app:
             while True:
                 # await self.test_formating()
@@ -720,7 +733,7 @@ class TelegramSummarizer:
         else:
             summary_instruction = f"Provide a {summary_length} summary of this {thread_size} thread. Include the main topics discussed, key questions and answers, and overall sentiment or conclusions."
 
-        prompt = f"""{summary_instruction}. The conversation is from the channel "{channel_name}.  {format_style}". 
+        prompt = f"""{summary_instruction}. Conversation is un ukrainian. Use ukrainian for summary too. The conversation is from the channel "{channel_name}.  {format_style}". 
     Conversation:
     {formatted_conversation}
     __
@@ -1237,7 +1250,7 @@ Here are the messages from the group:
 
         # split the string into tokens and again ask model to summarize
 
-        prompt = f"You are an assistant that summarizes conversations. Summarize the following summaries. Write summaries in a clear and concise manner. {format_style}\n{'\n'.join(summaries)}"
+        prompt = f"You are an assistant that summarizes conversations. Summarize the following summaries. Write summaries in a clear and concise manner. Summaries is un ukrainian. Use ukrainian for summary too. {format_style}\n{'\n'.join(summaries)}"
 
         try:
             return self.model.chat(prompt)
@@ -1245,8 +1258,6 @@ Here are the messages from the group:
             print(f"Error summarizing chunk: {e}")
             return ""
 
-
 if __name__ == "__main__":
     summarizer = TelegramSummarizer()
-    # summarizer.app.run(summarizer.fetch_dialogs())
-    summarizer.app.run(summarizer.process_channels())
+    asyncio.run(summarizer.process_channels())
