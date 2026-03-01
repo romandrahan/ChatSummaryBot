@@ -1,15 +1,27 @@
 import asyncio
+import json
 import sys
 import traceback
-import uvloop
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from time import sleep
 import emoji
 import grapheme
 from groq import Groq
+from openai import OpenAI
 import pytz
 import os
+
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 import ollama
 from transformers import GPT2Tokenizer
 
@@ -30,11 +42,14 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
-uvloop.install()
+try:
+    import uvloop
+
+    uvloop.install()
+except ImportError:
+    uvloop = None
 
 url_pattern = re.compile(r"(https?://\S+)")
-# api_key = os.environ.get("GROQ_API_KEY")
-api_key = "todo"
 ALL_TOPIC = "Main topic"
 
 
@@ -67,7 +82,7 @@ tokenizer = GPT2Tokenizer.from_pretrained(
 )
 
 
-format_style = """Format using emojis, bbbullet points, and other visual elements to make the summary engaging and easy to read."""
+format_style = "Keep the response concise and structured."
 
 
 def is_private_group(chat: Chat) -> bool:
@@ -178,6 +193,9 @@ class OllamaModel(SummarizationModel):
 class GroqModel(SummarizationModel):
     def __init__(self, model_name: str):
         super().__init__()
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is not set")
         self.client = Groq(api_key=api_key)
         self.model_name = model_name
 
@@ -205,6 +223,28 @@ class GroqModel(SummarizationModel):
             chunk_choice = c[0]
             response += chunk_choice.delta.content or ""
         return response.strip()
+
+
+class OpenAIModel(SummarizationModel):
+    def __init__(self, model_name: str):
+        super().__init__()
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is not set")
+        self.client = OpenAI(api_key=api_key)
+        self.model_name = model_name
+
+    def chat(self, prompt: str) -> str:
+        if self.context:
+            prompt = f"{prompt}\n\n{self.context}"
+
+        completion = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        content = completion.choices[0].message.content
+        return content.strip() if content else ""
 
 
 @dataclass
@@ -273,16 +313,70 @@ def get_chat_name(chat: Chat) -> str:
 
 
 class TelegramSummarizer:
+    @staticmethod
+    def _resolve_config_value(config: dict, key: str, env_key: str | None = None):
+        value = config.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if value in (None, "", "TODO"):
+            if env_key:
+                env_value = os.environ.get(env_key, "").strip()
+                if env_value:
+                    return env_value
+            return None
+        return value
+
+    @staticmethod
+    def _parse_required_int(value, field_name: str, hint: str = "") -> int:
+        if value is None:
+            raise ValueError(
+                f"Missing required '{field_name}'. {hint}".strip()
+            )
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid '{field_name}': expected integer, got '{value}'. {hint}".strip()
+            )
+
     def reload_config(self):
         self.config = load_config()
         config = self.config
         self.channels = config["channels"]
+
+        self.session_name = self._resolve_config_value(config, "session_name") or "chatSummary"
+        self.api_id = self._parse_required_int(
+            self._resolve_config_value(config, "api_id", "TELEGRAM_API_ID"),
+            "api_id",
+            "Set api_id in config.yaml or TELEGRAM_API_ID env var.",
+        )
+        self.api_hash = self._resolve_config_value(
+            config, "api_hash", "TELEGRAM_API_HASH"
+        )
+        if not self.api_hash:
+            raise ValueError(
+                "Missing required 'api_hash'. Set api_hash in config.yaml or TELEGRAM_API_HASH env var."
+            )
+
+        self.summary_channel_id = self._parse_required_int(
+            self._resolve_config_value(config, "summary_channel_id"),
+            "summary_channel_id",
+            "Set summary_channel_id in config.yaml (Telegram chat/channel id).",
+        )
+        if any(c.get("id") == self.summary_channel_id for c in self.channels):
+            print(
+                "Warning: one of source channels equals summary_channel_id. "
+                "The bot may summarize its own summary posts."
+            )
+
         default_model_provider = config.get("model_provider", "ollama")
         default_model_name = config.get("model_name", "llama3.2")
         if default_model_provider == "ollama":
             self.model = OllamaModel(default_model_name)
         elif default_model_provider == "groq":
             self.model = GroqModel(default_model_name)
+        elif default_model_provider == "openai":
+            self.model = OpenAIModel(default_model_name)
         else:
             raise ValueError("Invalid model provider")
         self.max_length = config.get("max_length", 4000)
@@ -298,7 +392,6 @@ class TelegramSummarizer:
         self.reload_config()
         self.app = None
         self.thread_cache: dict[str, ThreadInfo] = {}
-        self.summary_channel_id = self.config["summary_channel_id"]
 
     def ensure_app(self):
         """
@@ -307,9 +400,9 @@ class TelegramSummarizer:
         """
         if self.app is None:
             self.app = Client(
-                self.config["session_name"],
-                api_id=self.config["api_id"],
-                api_hash=self.config["api_hash"],
+                self.session_name,
+                api_id=self.api_id,
+                api_hash=self.api_hash,
             )
 
     async def get_chat_topics(self, chat_id) -> dict[str, int]:
@@ -733,7 +826,7 @@ class TelegramSummarizer:
         else:
             summary_instruction = f"Provide a {summary_length} summary of this {thread_size} thread. Include the main topics discussed, key questions and answers, and overall sentiment or conclusions."
 
-        prompt = f"""{summary_instruction}. Conversation is un ukrainian. Use ukrainian for summary too. The conversation is from the channel "{channel_name}.  {format_style}". 
+        prompt = f"""{summary_instruction}. Розмова українською мовою. Відповідай українською. Розмова з каналу "{channel_name}". {format_style}
     Conversation:
     {formatted_conversation}
     __
@@ -881,35 +974,171 @@ class TelegramSummarizer:
         first_url,
         last_url,
     ):
-        highlights = f"📝 {format_user_friendly_date(offset)}\n\n"
-        many_topic = len(topic_msgs) > 1
-
-        # Group-level insights
-        highlights += self.generate_group_level_insights(
-            channel_name,
-            topic_msgs,
-            active_participants,
-            msg_per_hour_of_day,
-            first_url,
-            last_url,
+        topics, events = self.generate_daily_sections(channel_name, topic_msgs)
+        total_messages, active_users, top_users = self.generate_daily_statistics(
+            topic_msgs, active_participants
+        )
+        return self.render_daily_summary(
+            topics, events, total_messages, active_users, top_users
         )
 
-        # Topic-level summaries
-        for topic_name, topic_msgs in topic_msgs.items():
+    @staticmethod
+    def _try_parse_json(text: str) -> dict:
+        if not text:
+            return {}
+
+        normalized = text.strip()
+        if normalized.startswith("```"):
+            normalized = re.sub(r"^```(?:json)?\s*", "", normalized)
+            normalized = re.sub(r"\s*```$", "", normalized)
+
+        try:
+            return json.loads(normalized)
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{.*\}", normalized, re.DOTALL)
+        if not match:
+            return {}
+
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _fallback_topics(text: str, limit: int = 3) -> list[str]:
+        topics = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip().lstrip("-• ").strip()
+            if not line:
+                continue
+            if len(line) < 8:
+                continue
+            line = line[:120].rstrip(".")
+            topics.append(line)
+            if len(topics) == limit:
+                break
+        if not topics:
+            topics = ["Обговорення поточних питань у чаті"]
+        return topics
+
+    def generate_daily_sections(
+        self, channel_name: str, topic_msgs: dict[str, list[str]]
+    ) -> tuple[list[str], str]:
+        merged_messages = []
+        many_topic = len(topic_msgs) > 1
+
+        for topic_name, messages in topic_msgs.items():
             if many_topic:
-                highlights += f"\n\n📌 {topic_name} Summary:\n"
-            highlights += self.generate_topic_summary(
-                topic_name,
-                topic_msgs,
-                analysed_msgs[topic_name],
-                active_participants[topic_name],
-                thread_roots[topic_name],
-                collected_links[topic_name],
+                merged_messages.append(f"[Тема: {topic_name}]")
+            merged_messages.extend(reversed(messages))
+
+        if not merged_messages:
+            return (
+                ["Суттєвих тем за період не зафіксовано"],
+                "Суттєвих подій за період не зафіксовано.",
             )
 
-        highlights += f"\n\n🏷️ Tags: #summary {make_hashtag(channel_name)} {make_hashtag(self.model.model_name)}\n"
+        base_summary = self.generate_summaries(merged_messages, channel_name, None).strip()
+        if not base_summary:
+            return (
+                ["Суттєвих тем за період не зафіксовано"],
+                "Суттєвих подій за період не зафіксовано.",
+            )
 
-        return highlights
+        prompt = f"""
+Ти аналізуєш підсумок повідомлень із Telegram-чату "{channel_name}".
+Поверни тільки JSON без markdown у форматі:
+{{
+  "topics": ["тема 1", "тема 2", "тема 3"],
+  "events": "Зв'язний опис подій у 1-2 абзацах."
+}}
+Вимоги:
+- Мова: тільки українська.
+- "topics": 2-5 коротких пунктів без нумерації та без крапки в кінці.
+- "events": стислий зв'язний опис того, що відбувалось.
+
+Текст для аналізу:
+{base_summary}
+"""
+        try:
+            parsed = self._try_parse_json(self.model.chat(prompt))
+        except Exception as e:
+            print(f"Error generating daily sections: {e}")
+            return self._fallback_topics(base_summary), base_summary
+
+        topics = parsed.get("topics", [])
+        events = parsed.get("events", "")
+
+        if not isinstance(topics, list):
+            topics = []
+        topics = [str(t).strip().rstrip(".") for t in topics if str(t).strip()]
+        topics = topics[:5]
+        if not topics:
+            topics = self._fallback_topics(base_summary)
+
+        if not isinstance(events, str) or not events.strip():
+            events = base_summary
+
+        return topics, events.strip()
+
+    def generate_daily_statistics(
+        self, topic_msgs: dict[str, list[str]], active_participants: dict[int, list[Message]]
+    ) -> tuple[int, int, list[tuple[str, int]]]:
+        total_messages = sum(len(messages) for messages in topic_msgs.values())
+
+        user_message_counter = Counter()
+        user_names = {}
+        for topic_participants in active_participants.values():
+            for user_id, messages in topic_participants.items():
+                if not messages:
+                    continue
+                user_message_counter[user_id] += len(messages)
+                user_names[user_id] = self.get_user_str(messages[0])
+
+        active_users = len(user_message_counter)
+        top_users = [
+            (user_names.get(user_id, "Unknown User"), count)
+            for user_id, count in user_message_counter.most_common(3)
+        ]
+        return total_messages, active_users, top_users
+
+    def render_daily_summary(
+        self,
+        topics: list[str],
+        events: str,
+        total_messages: int,
+        active_users: int,
+        top_users: list[tuple[str, int]],
+    ) -> str:
+        top_users_str = (
+            ", ".join(f"{name} ({count} пов.)" for name, count in top_users)
+            if top_users
+            else "немає даних"
+        )
+
+        lines = [
+            "#ПідсумокДня",
+            "",
+            "Привіт, сусіди! Короткий огляд того, що сьогодні відбувалось у нашому чаті.",
+            "",
+            "🏠 Основні теми:",
+        ]
+        lines.extend(f"- {topic}" for topic in topics)
+        lines.extend(
+            [
+                "",
+                "📝 Що відбувалось:",
+                events,
+                "",
+                "📊 Статистика:",
+                f"- Кількість повідомлень: {total_messages}",
+                f"- Активних учасників: {active_users}",
+                f"- Топ-3 найактивніших дописувачів: {top_users_str}.",
+            ]
+        )
+        return "\n".join(lines)
 
     def generate_group_level_insights(
         self,
@@ -1064,7 +1293,13 @@ class TelegramSummarizer:
             if name and message.from_user.last_name:
                 name += " " + message.from_user.last_name
             username = message.from_user.username or ""
-            return f"{name} (@{username})".strip()
+            if name and username:
+                return f"{name} (@{username})".strip()
+            if name:
+                return name.strip()
+            if username:
+                return f"@{username}"
+            return "Unknown User"
         else:
             return "Unknown User"
 
@@ -1150,8 +1385,10 @@ class TelegramSummarizer:
 
     def summarize_chunk(self, chunk, channel_name):
         prompt = f"""
-Summarize the key points and main topics discussed in the messages from the Telegram group titled "{channel_name}". Focus on the important details, actions required, decisions made, and any relevant information that stands out. Exclude small talk or irrelevant conversation, and aim to create a clear and concise summary that captures the essence of the discussions. Write summaries in a clear and concise manner. {format_style}
-Here are the messages from the group:
+Ти підсумовуєш повідомлення з Telegram-чату "{channel_name}".
+Зроби стислий зміст українською мовою: ключові події, запити, рішення, домовленості.
+Ігноруй дрібний офтоп. Відповідь без вступних фраз.
+Ось повідомлення:
 {chunk}
 """
         try:
@@ -1162,8 +1399,11 @@ Here are the messages from the group:
 
     def generate_summaries(
         self, msgs: list[str], channel_name: str, offset: datetime
-    ) -> list[str]:
+    ) -> str:
         chunks = self.chunk_text(msgs)  # TODO: fix msgs with value None; remove them
+        if not chunks:
+            print(f"No chunks created for {channel_name}; input lines: {len(msgs)}")
+            return ""
 
         summaries = []
         for idx, chunk in enumerate(chunks):
@@ -1243,6 +1483,8 @@ Here are the messages from the group:
 
     def summarize_summaries(self, summaries: list[str], offset: datetime) -> str:
         # if summaries are too long, summarize them
+        if not summaries:
+            return ""
         if len(summaries) <= 1:
             return summaries[0]
 
@@ -1250,13 +1492,17 @@ Here are the messages from the group:
 
         # split the string into tokens and again ask model to summarize
 
-        prompt = f"You are an assistant that summarizes conversations. Summarize the following summaries. Write summaries in a clear and concise manner. Summaries is un ukrainian. Use ukrainian for summary too. {format_style}\n{'\n'.join(summaries)}"
+        prompt = (
+            "Ти асистент, який стисло об'єднує підсумки повідомлень. "
+            "Поверни фінальний зведений підсумок українською, без води.\n"
+            f"{chr(10).join(summaries)}"
+        )
 
         try:
             return self.model.chat(prompt)
         except Exception as e:
-            print(f"Error summarizing chunk: {e}")
-            return ""
+            print(f"Error merging chunk summaries: {e}")
+            return "\n".join(summaries)
 
 if __name__ == "__main__":
     summarizer = TelegramSummarizer()

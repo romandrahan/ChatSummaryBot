@@ -1,0 +1,14 @@
+session_name: chatSummary
+api_id: "35380247"
+api_hash: "9c6f77e49712f5d26fb8217fdd4ad2ed"
+model_provider: openai # openai | groq | ollama
+model_name: gpt-4o-mini # groq: llama-3.1-8b-instant, ollama: llama3.2
+max_length: 4000
+summarization_frequency: 24 # in hours
+output_dir: summaries
+summary_channel_id: -5158980066 # channel id where summaries will be posted
+channels:
+  - id: -5158980066
+    name: LEETCODE_HEROES
+    filters:
+      keywords: []

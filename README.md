@@ -5,10 +5,14 @@ ChatSummaryBot is a simple bot that summarizes chat messages in group chats. Cur
 ## Features
 
 - Summarizes chat messages from Telegram channels.
-- Supports multiple summarization models: Ollama and Groq.
+- Supports multiple summarization models: OpenAI, Ollama, and Groq.
 - Configurable via a YAML file.
-- Generates summaries using emojis, bullet points, and other visual elements.
-- Provides daily summaries and highlights active participants.
+- Generates a daily summary in Ukrainian in a fixed format:
+  - `#ПідсумокДня`
+  - `🏠 Основні теми`
+  - `📝 Що відбувалось`
+  - `📊 Статистика`
+- Provides message/participant stats and top active contributors.
 - Extracts and summarizes links and attachments.
 - Bots generate messages and send them every 24 hours.
 - Supports channels with subtopics (subforms), processing each subtopic separately and generating summaries per topic.
@@ -21,7 +25,7 @@ ChatSummaryBot is a simple bot that summarizes chat messages in group chats. Cur
 
 - Python 3.12 or higher. Other version of Python 3 may work, but not tested.
 - Telegram API credentials (API ID and API Hash)
-- Supported summarization models (Ollama or Groq)
+- API key for your selected model provider (`OPENAI_API_KEY` or `GROQ_API_KEY`) or local Ollama setup
 
 ## Installation
 
@@ -54,8 +58,8 @@ ChatSummaryBot is a simple bot that summarizes chat messages in group chats. Cur
     session_name: chatSummary
     api_id: "YOUR_API_ID"
     api_hash: "YOUR_API_HASH"
-    model_provider: ollama  # or groq
-    model_name: llama3.2  # or your preferred model
+    model_provider: openai  # openai | groq | ollama
+    model_name: gpt-4o-mini
     max_length: 4000
     summarization_frequency: 24  # in hours
     output_dir: summaries
@@ -75,8 +79,15 @@ ChatSummaryBot is a simple bot that summarizes chat messages in group chats. Cur
 
 ## Model Configuration
 
+### OpenAI (recommended for strict output format)
+1. Create an API key at https://platform.openai.com/api-keys
+2. Set the environment variable (or place it in a local `.env` file):
+    ```sh
+    export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+    ```
+
 ### Groq Cloud
-This option is recommended because it allows for larger models, and Groq cloud offers a free tier that is sufficient for personal use cases.
+This option is useful if you prefer Groq-hosted models.
 
 1. Sign up for a Groq Cloud account and obtain your API key.
 2. Set the `GROQ_API_KEY` environment variable:
@@ -99,9 +110,9 @@ ollama serve
 
 ## Usage
 
-1. Run the summarizer bot. Omit GROQ_API_KEY if you are using the Ollama model.
+1. Run the summarizer bot after setting the provider key (or without key for local Ollama).
     ```sh
-    GROQ_API_KEY=1231 python summarizeChat.py
+    OPENAI_API_KEY=YOUR_OPENAI_API_KEY python summarizeChat.py
     ```
 
 2. The bot will start processing the configured channels and generate summaries based on the specified frequency.
