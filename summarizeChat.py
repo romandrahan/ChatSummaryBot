@@ -1121,7 +1121,7 @@ class TelegramSummarizer:
         lines = [
             "#ПідсумокДня",
             "",
-            "Привіт, сусіди! Короткий огляд того, що сьогодні відбувалось у нашому чаті.",
+            "Привіт, світлі голови! Короткий огляд того, що сьогодні відбувалось у нашому чаті за добу.",
             "",
             "🏠 Основні теми:",
         ]
@@ -1475,7 +1475,7 @@ class TelegramSummarizer:
         # Send the summary message to the topic
         parts = self.split_message(summary)
         for i, part in enumerate(parts):
-            part = f"{part}\n\nPart {i + 1}/{len(parts)}"
+            part = f"{part}\n\nЧастина {i + 1}/{len(parts)}"
             await self.app.send_message(
                 chat_id=self.summary_channel_id, text=part, reply_to_message_id=topic_id
             )
